@@ -1,21 +1,25 @@
-// netlify/functions/mixtape.js
+// netlify/functions/mixtape.mjs
 //
-// 프론트엔드는 이 함수로만 요청을 보냅니다. API 키는 서버 환경변수에만 존재하고
-// 브라우저로 절대 내려가지 않습니다.
+// 프론트엔드는 이 함수로만 요청을 보냅니다.
+// API 키는 서버 환경변수에만 존재하고 브라우저로 절대 내려가지 않습니다.
+//
+// 프론트엔드가 보내는 형식 (공급자 중립):
+//   { images: [{ mime, data }], prompt: "..." }
+// 이 함수가 돌려주는 형식:
+//   { text: "모델이 생성한 JSON 문자열" }
 //
 // 배포 전 준비
-//   1) Netlify 대시보드 → Site settings → Environment variables
-//      ANTHROPIC_API_KEY = sk-ant-...
-//   2) 프론트엔드의 API_ENDPOINT 를 "/.netlify/functions/mixtape" 으로 변경
-//   3) console.anthropic.com → Limits 에서 월 예산 상한(Spend limit)을 반드시 설정
+//   1) Netlify → Site configuration → Environment variables
+//      GEMINI_API_KEY = ...
+//   2) Deploys → Trigger deploy → Clear cache and deploy site
 
-const MODEL = "claude-sonnet-5"; // 비용을 더 낮추려면 "claude-haiku-4-5-20251001"
-const MAX_TOKENS = 1000;
+const MODEL = "gemini-3.6-flash"; // 더 저렴하게: "gemini-3.5-flash-lite"
+const MAX_TOKENS = 4096; // thinking 토큰까지 포함되므로 넉넉히 잡습니다
+const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
-// IP당 제한 (함수 인스턴스 메모리 기준 — 완벽하진 않지만 1차 방어로 충분)
-const WINDOW_MS = 60 * 60 * 1000; // 1시간
+const WINDOW_MS = 60 * 60 * 1000;
 const PER_IP_PER_HOUR = 8;
-const GLOBAL_PER_HOUR = 400; // 전체 상한: 시간당 400회 ≈ 하루 최대 약 9,600회
+const GLOBAL_PER_HOUR = 400;
 
 const hits = new Map();
 let globalHits = [];
@@ -24,20 +28,23 @@ function tooMany(ip) {
   const now = Date.now();
   globalHits = globalHits.filter((t) => now - t < WINDOW_MS);
   if (globalHits.length >= GLOBAL_PER_HOUR) return "global";
-
   const mine = (hits.get(ip) || []).filter((t) => now - t < WINDOW_MS);
   if (mine.length >= PER_IP_PER_HOUR) return "ip";
-
   mine.push(now);
   hits.set(ip, mine);
   globalHits.push(now);
-  if (hits.size > 5000) hits.clear(); // 메모리 방어
+  if (hits.size > 5000) hits.clear();
   return null;
 }
 
+const OK_MIME = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
 export default async (req) => {
-  if (req.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+
+  if (!process.env.GEMINI_API_KEY) {
+    console.error("GEMINI_API_KEY 환경변수가 없습니다.");
+    return Response.json({ error: "서버 설정이 아직 준비되지 않았어요." }, { status: 500 });
   }
 
   const ip =
@@ -65,47 +72,90 @@ export default async (req) => {
     return Response.json({ error: "잘못된 요청입니다." }, { status: 400 });
   }
 
-  // 클라이언트가 보낸 model/max_tokens 는 신뢰하지 않고 서버 값으로 고정합니다.
-  const messages = Array.isArray(body?.messages) ? body.messages : null;
-  if (!messages) {
+  const prompt = typeof body?.prompt === "string" ? body.prompt : "";
+  const images = Array.isArray(body?.images) ? body.images : [];
+
+  if (!prompt || prompt.length > 8000) {
     return Response.json({ error: "잘못된 요청입니다." }, { status: 400 });
   }
-
-  // 이미지 개수·용량 상한 (비용 폭주 방지)
-  const imgs = messages
-    .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
-    .filter((c) => c.type === "image");
-  if (imgs.length > 2) {
-    return Response.json({ error: "이미지는 최대 2장까지 가능합니다." }, { status: 400 });
+  if (!images.length || images.length > 2) {
+    return Response.json({ error: "이미지는 1~2장까지 가능합니다." }, { status: 400 });
   }
-  const bytes = imgs.reduce((n, c) => n + (c.source?.data?.length || 0) * 0.75, 0);
+  for (const im of images) {
+    if (!OK_MIME.includes(im?.mime) || typeof im?.data !== "string") {
+      return Response.json({ error: "지원하지 않는 이미지 형식입니다." }, { status: 400 });
+    }
+  }
+  const bytes = images.reduce((n, im) => n + im.data.length * 0.75, 0);
   if (bytes > 9.5 * 1024 * 1024) {
     return Response.json({ error: "이미지 용량이 너무 큽니다." }, { status: 413 });
   }
 
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
+    const r = await fetch(ENDPOINT, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
+        "x-goog-api-key": process.env.GEMINI_API_KEY,
       },
-      body: JSON.stringify({ model: MODEL, max_tokens: MAX_TOKENS, messages }),
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              ...images.map((im) => ({ inlineData: { mimeType: im.mime, data: im.data } })),
+              { text: prompt },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          maxOutputTokens: MAX_TOKENS,
+        },
+        safetySettings: [
+          "HARM_CATEGORY_HARASSMENT",
+          "HARM_CATEGORY_HATE_SPEECH",
+          "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "HARM_CATEGORY_DANGEROUS_CONTENT",
+        ].map((category) => ({ category, threshold: "BLOCK_ONLY_HIGH" })),
+      }),
     });
 
+    const data = await r.json();
+
     if (!r.ok) {
-      const detail = await r.text();
-      console.error("anthropic error", r.status, detail.slice(0, 500));
+      console.error("gemini error", r.status, JSON.stringify(data).slice(0, 600));
+      if (r.status === 429) {
+        return Response.json(
+          { error: "지금 요청이 몰려 있어요. 30초 뒤에 다시 시도해 주세요." },
+          { status: 429 }
+        );
+      }
       return Response.json(
         { error: "지금은 테이프를 구울 수 없어요. 잠시 뒤에 다시 시도해 주세요." },
         { status: 502 }
       );
     }
 
-    return Response.json(await r.json(), {
-      headers: { "cache-control": "no-store" },
-    });
+    const cand = data?.candidates?.[0];
+    if (data?.promptFeedback?.blockReason || cand?.finishReason === "SAFETY") {
+      return Response.json(
+        { error: "이 그림으로는 만들 수 없었어요. 다른 그림으로 시도해 주세요." },
+        { status: 422 }
+      );
+    }
+
+    const text = (cand?.content?.parts || [])
+      .filter((p) => !p.thought && typeof p.text === "string")
+      .map((p) => p.text)
+      .join("");
+
+    if (!text) {
+      console.error("empty candidate", JSON.stringify(data).slice(0, 600));
+      return Response.json({ error: "응답이 비어 있었어요. 다시 시도해 주세요." }, { status: 502 });
+    }
+
+    return Response.json({ text }, { headers: { "cache-control": "no-store" } });
   } catch (e) {
     console.error(e);
     return Response.json({ error: "네트워크 오류가 발생했어요." }, { status: 502 });

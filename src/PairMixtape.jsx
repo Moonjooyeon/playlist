@@ -460,7 +460,7 @@ function Cassette({ pairLabel, mood, spinning, wind = 0, tint }) {
    아래 fetch 본문의 model 값(claude-sonnet-4-6)은 아티팩트 미리보기 전용입니다.
    프록시를 거치면 서버가 model 을 claude-sonnet-5 로 덮어쓰므로,
    배포본은 항상 Sonnet 5 로 동작합니다. 두 값이 달라도 정상입니다. */
-const API_ENDPOINT = "/.netlify/functions/mixtape";
+const API_ENDPOINT = "https://api.anthropic.com/v1/messages";
 
 export default function PairMixtape() {
   const [names, setNames] = useState(["", ""]);
@@ -761,39 +761,52 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
 - deep: 글자색. accent와 같은 계열의 아주 어두운 색. 흰 배경 위에서 또렷이 읽혀야 한다.`;
 
     try {
+      const imgs = (onePic ? [photos[0]] : [photos[0], photos[1]]).filter(Boolean);
+
+      /* 프록시(배포)로는 중립 형식으로 보내고, 프록시가 공급자 형식으로 번역한다.
+         아티팩트 미리보기에서만 Anthropic 형식으로 직접 호출. */
+      const direct = API_ENDPOINT.includes("api.anthropic.com");
+      const body = direct
+        ? {
+            model: "claude-sonnet-4-6",
+            max_tokens: 1000,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  ...imgs.map((p) => ({
+                    type: "image",
+                    source: { type: "base64", media_type: p.mime, data: p.data },
+                  })),
+                  { type: "text", text: prompt },
+                ],
+              },
+            ],
+          }
+        : { images: imgs.map((p) => ({ mime: p.mime, data: p.data })), prompt };
+
       const res = await fetch(API_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          messages: [
-            {
-              role: "user",
-              content: [
-                ...(onePic ? [photos[0]] : [photos[0], photos[1]]).map((p) => ({
-                  type: "image",
-                  source: { type: "base64", media_type: p.mime, data: p.data },
-                })),
-                { type: "text", text: prompt },
-              ],
-            },
-          ],
-        }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
-      const text = (data.content || [])
-        .map((b) => (b.type === "text" ? b.text : ""))
-        .join("")
-        .replace(/```json|```/g, "")
-        .trim();
+      if (!res.ok) throw new Error(data?.error || "request failed");
+      const raw =
+        typeof data.text === "string"
+          ? data.text
+          : (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("");
+      const text = raw.replace(/```json|```/g, "").trim();
       const parsed = JSON.parse(text);
       if (!parsed.tracks?.length) throw new Error("shape");
       setResult(parsed);
       setStatus("player");
       setPlaying(true);
-    } catch {
-      setError("테이프를 굽지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
+    } catch (e) {
+      const m = String(e?.message || "");
+      setError(m && m !== "shape" && m !== "request failed"
+        ? m
+        : "테이프를 굽지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
       setStatus("error");
     }
   }
