@@ -460,7 +460,7 @@ function Cassette({ pairLabel, mood, spinning, wind = 0, tint }) {
    아래 fetch 본문의 model 값(claude-sonnet-4-6)은 아티팩트 미리보기 전용입니다.
    프록시를 거치면 서버가 model 을 claude-sonnet-5 로 덮어쓰므로,
    배포본은 항상 Sonnet 5 로 동작합니다. 두 값이 달라도 정상입니다. */
-const API_ENDPOINT = "/.netlify/functions/mixtape";
+const API_ENDPOINT = "https://api.anthropic.com/v1/messages";
 
 export default function PairMixtape() {
   const [names, setNames] = useState(["", ""]);
@@ -874,16 +874,33 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
     return out;
   }
 
+  /* 키치 팔레트 — 내보내기용으로 채도를 확 올린다 */
+  function kitsch(hex, s = 0.8, l = 0.6) {
+    const [h] = hexHsl(hex);
+    return hslHex(h, s, l);
+  }
+
   async function savePNG() {
     if (!result || saving) return;
     setSaving(true);
     setError("");
     try {
+      const base = {
+        rose: themeVars["--pp-rose"],
+        deep: themeVars["--pp-deep"],
+        bg1: themeVars["--pp-bg1"],
+        bg2: themeVars["--pp-bg2"],
+      };
+      const [hh] = hexHsl(base.rose);
       const T = {
-        bg1: themeVars["--pp-bg1"], bg2: themeVars["--pp-bg2"], bg3: themeVars["--pp-bg3"],
-        rose: themeVars["--pp-rose"], deep: themeVars["--pp-deep"],
-        card: themeVars["--pp-card"], soft: themeVars["--pp-soft"],
-        mut: themeVars["--pp-mut"], lav: themeVars["--pp-lav"],
+        pop: kitsch(base.rose, 0.92, 0.58),          // 메인 액센트
+        pop2: hslHex((hh + 42) % 360, 0.9, 0.66),    // 보조 액센트
+        pop3: hslHex((hh + 200) % 360, 0.78, 0.66),  // 반대편 색
+        soft: kitsch(base.rose, 0.85, 0.93),         // 아주 옅은 배경
+        soft2: hslHex((hh + 42) % 360, 0.85, 0.93),
+        ink: hslHex(hh, 0.55, 0.2),                  // 글자
+        bg1: kitsch(base.bg1, 0.75, 0.86),
+        bg2: kitsch(base.bg2, 0.8, 0.76),
       };
       try {
         await Promise.all([
@@ -893,153 +910,185 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
         ]);
       } catch {}
 
-      const W = 880, pad = 40, inX = pad + 26, inW = W - (pad + 26) * 2;
+      const W = 900, pad = 34, inX = pad + 30, inW = W - (pad + 30) * 2;
       const artH = 470;
 
-      /* 높이 계산 */
+      /* ── 높이 계산 ── */
       const mc = document.createElement("canvas").getContext("2d");
-      mc.font = '400 21px "Pretendard Variable", Pretendard, system-ui, sans-serif';
-      const evalLines = wrap(mc, result.evaluation || "", inW);
+      mc.font = '500 21px "Pretendard Variable", sans-serif';
+      const evalLines = wrap(mc, result.evaluation || "", inW - 40);
       const rowHs = allTracks.map((t) => {
-        mc.font = '400 21px "Nanum Myeongjo", AppleMyungjo, Batang, serif';
-        const noteLines = t.note ? wrap(mc, t.note, inW - 150).length : 0;
-        return 78 + noteLines * 28;
+        mc.font = '400 21px "Nanum Myeongjo", serif';
+        const n = t.note ? wrap(mc, t.note, inW - 140).length : 0;
+        return 92 + n * 30;
       });
       const H =
-        70 /*top*/ + 24 + artH + 34 + 62 /*title*/ + 40 /*tagline*/ +
-        26 + evalLines.length * 34 + 36 /*divider*/ +
-        rowHs.reduce((a, b) => a + b, 0) + allTracks.length * 12 +
-        88 /*foot*/;
+        58 + artH + 40 + 74 + 44 + 34 + evalLines.length * 34 + 40 +
+        rowHs.reduce((a, b) => a + b, 0) + allTracks.length * 14 + 108;
 
       const c = document.createElement("canvas");
       c.width = W; c.height = H;
       const ctx = c.getContext("2d");
 
-      /* 배경 */
-      const g = ctx.createLinearGradient(0, 0, 0, H);
-      g.addColorStop(0, T.bg1); g.addColorStop(0.55, T.bg2); g.addColorStop(1, T.bg3);
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, W, H);
-
-      /* 카드 — 종이 텍스처를 잘라 붙이고 테마 색을 곱해 물들임 */
-      const texPaper = await loadImage(TEX_PAPER);
-      const cardX = pad, cardY = 48, cardW = W - pad * 2, cardH = H - 48 - 34;
-      ctx.save();
-      ctx.shadowColor = "rgba(0,0,0,.25)"; ctx.shadowBlur = 40; ctx.shadowOffsetY = 18;
-      rr(ctx, cardX, cardY, cardW, cardH, 32);
-      ctx.fillStyle = T.card; ctx.fill();
-      ctx.restore();
-      ctx.save();
-      rr(ctx, cardX, cardY, cardW, cardH, 32);
-      ctx.clip();
-      drawPaper(ctx, texPaper, cardX, cardY, cardW, cardH);
-      ctx.globalCompositeOperation = "multiply";
-      ctx.globalAlpha = 0.5;
-      ctx.fillStyle = T.card;
-      ctx.fillRect(cardX, cardY, cardW, cardH);
-      ctx.restore();
-
-      /* 스캘럽 */
-      ctx.fillStyle = T.card;
-      for (let x = pad + 30; x < W - pad - 20; x += 24) {
-        ctx.beginPath(); ctx.arc(x, 48, 11, 0, Math.PI * 2); ctx.fill();
+      /* ── 배경: 밝은 그라디언트 + 하프톤 점 ── */
+      const g = ctx.createLinearGradient(0, 0, W, H);
+      g.addColorStop(0, T.bg1); g.addColorStop(1, T.bg2);
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "rgba(255,255,255,.45)";
+      for (let y = 14; y < H; y += 26) {
+        for (let x = (y / 26) % 2 ? 14 : 27; x < W; x += 26) {
+          ctx.beginPath(); ctx.arc(x, y, 3.4, 0, Math.PI * 2); ctx.fill();
+        }
       }
 
-      let y = 70 + 24;
-
-      /* 아트워크 */
+      /* ── 카드: 흰 바탕 + 굵은 컬러 테두리 ── */
+      const cardX = pad, cardY = 24, cardW = W - pad * 2, cardH = H - 24 - 34;
       ctx.save();
-      rr(ctx, inX, y, inW, artH, 20); ctx.clip();
+      ctx.shadowColor = rgba(T.ink, 0.28); ctx.shadowBlur = 26; ctx.shadowOffsetY = 12;
+      rr(ctx, cardX, cardY, cardW, cardH, 34); ctx.fillStyle = "#fff"; ctx.fill();
+      ctx.restore();
+      ctx.lineWidth = 7; ctx.strokeStyle = T.pop;
+      rr(ctx, cardX + 3.5, cardY + 3.5, cardW - 7, cardH - 7, 31); ctx.stroke();
+
+      /* 상단 스캘럽 */
+      ctx.fillStyle = T.pop;
+      for (let x = cardX + 26; x < cardX + cardW - 18; x += 26) {
+        ctx.beginPath(); ctx.arc(x, cardY + 4, 9, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = "#fff";
+      for (let x = cardX + 26; x < cardX + cardW - 18; x += 26) {
+        ctx.beginPath(); ctx.arc(x, cardY + 1, 7, 0, Math.PI * 2); ctx.fill();
+      }
+
+      /* 별 찍기 */
+      const star = (x, y, r, col) => {
+        ctx.save(); ctx.translate(x, y); ctx.fillStyle = col; ctx.beginPath();
+        for (let i = 0; i < 8; i++) {
+          const a = (Math.PI / 4) * i;
+          const rad = i % 2 ? r * 0.34 : r;
+          ctx[i ? "lineTo" : "moveTo"](Math.cos(a) * rad, Math.sin(a) * rad);
+        }
+        ctx.closePath(); ctx.fill(); ctx.restore();
+      };
+
+      let y = 58;
+
+      /* ── 아트워크: 두꺼운 흰 프레임 ── */
+      ctx.save();
+      rr(ctx, inX, y, inW, artH, 22); ctx.clip();
       if (splitArt) {
         const [imA, imB] = await Promise.all([
           loadImage(`data:${photos[0].mime};base64,${photos[0].data}`),
           loadImage(`data:${photos[1].mime};base64,${photos[1].data}`),
         ]);
-        drawCover(ctx, imA, inX, y, inW * 0.51, artH);
-        drawCover(ctx, imB, inX + inW * 0.49, y, inW * 0.51, artH);
-        ctx.fillStyle = "rgba(255,255,255,.9)";
-        ctx.fillRect(inX + inW / 2 - 2, y, 4, artH);
+        drawCover(ctx, imA, inX, y, inW * 0.5, artH);
+        drawCover(ctx, imB, inX + inW * 0.5, y, inW * 0.5, artH);
       } else {
-        const im = await loadImage(`data:${photos[0].mime};base64,${photos[0].data}`);
-        drawCover(ctx, im, inX, y, inW, artH);
+        const im = await loadImage(cutout || `data:${photos[0].mime};base64,${photos[0].data}`);
+        if (cutout) {
+          const bg2 = ctx.createLinearGradient(inX, y, inX + inW, y + artH);
+          bg2.addColorStop(0, T.soft); bg2.addColorStop(1, T.soft2);
+          ctx.fillStyle = bg2; ctx.fillRect(inX, y, inW, artH);
+          const k = Math.min((inW * 0.8) / im.width, artH / im.height);
+          ctx.drawImage(im, inX + (inW - im.width * k) / 2, y + artH - im.height * k, im.width * k, im.height * k);
+        } else drawCover(ctx, im, inX, y, inW, artH);
       }
       ctx.restore();
-      ctx.lineWidth = 5; ctx.strokeStyle = "#fff";
-      rr(ctx, inX, y, inW, artH, 20); ctx.stroke();
+      ctx.lineWidth = 9; ctx.strokeStyle = "#fff";
+      rr(ctx, inX, y, inW, artH, 22); ctx.stroke();
+      ctx.lineWidth = 3; ctx.strokeStyle = T.pop;
+      rr(ctx, inX - 4.5, y - 4.5, inW + 9, artH + 9, 26); ctx.stroke();
       if (splitArt) {
-        ctx.beginPath(); ctx.arc(inX + inW / 2, y + artH / 2, 27, 0, Math.PI * 2);
+        ctx.beginPath(); ctx.arc(inX + inW / 2, y + artH / 2, 34, 0, Math.PI * 2);
         ctx.fillStyle = "#fff"; ctx.fill();
-        ctx.fillStyle = T.rose; ctx.font = "26px serif";
+        ctx.lineWidth = 4; ctx.strokeStyle = T.pop; ctx.stroke();
+        ctx.fillStyle = T.pop; ctx.font = "30px serif";
         ctx.textAlign = "center"; ctx.textBaseline = "middle";
         ctx.fillText("♥", inX + inW / 2, y + artH / 2 + 2);
+        ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
       }
-      ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
-      y += artH + 34;
+      star(inX - 10, y - 12, 15, T.pop2);
+      star(inX + inW + 12, y + artH + 8, 13, T.pop3);
+      y += artH + 40;
 
-      /* 제목 블록 */
-      ctx.fillStyle = T.deep;
-      ctx.font = '800 52px "Pretendard Variable", Pretendard, system-ui, sans-serif';
-      ctx.fillText(result.tapeTitle || "", inX, y + 40);
-      y += 62;
-      ctx.fillStyle = T.mut;
-      ctx.font = '400 25px "Nanum Myeongjo", AppleMyungjo, Batang, serif';
-      ctx.fillText(result.tagline || "", inX, y + 18);
-      ctx.font = '400 16px ui-monospace, Menlo, Consolas, monospace';
-      ctx.textAlign = "right";
-      ctx.fillText(`${solo ? "SOLO" : "PAIR"} TAPE · ${label}`, inX + inW, y + 16);
+      /* ── 제목: 흰 외곽선 두른 컬러 타이포 ── */
+      ctx.font = '800 56px "Pretendard Variable", sans-serif';
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 12; ctx.strokeStyle = "#fff";
+      ctx.strokeText(result.tapeTitle || "", inX, y + 44);
+      ctx.fillStyle = T.pop;
+      ctx.fillText(result.tapeTitle || "", inX, y + 44);
+      y += 74;
+
+      /* 부제 + 페어명 배지 */
+      ctx.font = '400 26px "Nanum Myeongjo", serif';
+      ctx.fillStyle = T.ink;
+      ctx.fillText(result.tagline || "", inX, y + 20);
+      const badge = `${solo ? "SOLO" : "PAIR"} · ${label}`;
+      ctx.font = '700 15px "Pretendard Variable", sans-serif';
+      const bw = ctx.measureText(badge).width + 30;
+      rr(ctx, inX + inW - bw, y - 2, bw, 32, 16); ctx.fillStyle = T.pop2; ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+      ctx.fillText(badge, inX + inW - bw / 2, y + 20);
       ctx.textAlign = "left";
-      y += 40;
+      y += 44;
 
-      /* 평가 */
-      ctx.fillStyle = mix(T.deep, "#FFFFFF", 0.16);
-      ctx.font = '400 21px "Pretendard Variable", Pretendard, system-ui, sans-serif';
-      for (const ln of evalLines) { ctx.fillText(ln, inX, y + 24); y += 34; }
-      y += 10;
-      ctx.strokeStyle = mix(T.deep, "#FFFFFF", 0.72); ctx.lineWidth = 2;
-      ctx.setLineDash([2, 7]);
-      ctx.beginPath(); ctx.moveTo(inX, y); ctx.lineTo(inX + inW, y); ctx.stroke();
-      ctx.setLineDash([]);
-      y += 26;
+      /* ── 라이너노트: 옅은 색 블록 ── */
+      const evalH = evalLines.length * 34 + 30;
+      rr(ctx, inX, y, inW, evalH, 18); ctx.fillStyle = T.soft; ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = T.pop; ctx.stroke();
+      ctx.fillStyle = T.ink;
+      ctx.font = '500 21px "Pretendard Variable", sans-serif';
+      let ey = y + 22;
+      for (const ln of evalLines) { ctx.fillText(ln, inX + 20, ey + 12); ey += 34; }
+      y += evalH + 40;
 
-      /* 트랙 */
+      /* ── 트랙: 스티커형 행 ── */
       allTracks.forEach((t, i) => {
         const rh = rowHs[i];
-        if (t.hidden) {
-          rr(ctx, inX - 12, y - 8, inW + 24, rh, 18);
-          ctx.fillStyle = T.deep; ctx.fill();
-        }
-        const fg = t.hidden ? mix(T.card, T.rose, 0.1) : T.deep;
-        const sub = t.hidden ? mix(T.deep, "#FFFFFF", 0.55) : T.mut;
-        ctx.fillStyle = t.hidden ? T.lav : mix(T.deep, "#FFFFFF", 0.5);
-        ctx.font = '700 20px ui-monospace, Menlo, Consolas, monospace';
-        ctx.fillText(t.hidden ? "★" : String(t.no).padStart(2, "0"), inX + 6, y + 26);
-        ctx.fillStyle = fg;
-        ctx.font = '700 26px "Pretendard Variable", Pretendard, system-ui, sans-serif';
-        ctx.fillText(t.title || "", inX + 62, y + 28);
-        ctx.fillStyle = sub;
-        ctx.font = '500 18px "Pretendard Variable", Pretendard, system-ui, sans-serif';
-        ctx.fillText(t.artist || "", inX + 62, y + 54);
+        const fill = t.hidden ? T.ink : i % 2 ? T.soft2 : T.soft;
+        rr(ctx, inX, y, inW, rh, 20); ctx.fillStyle = fill; ctx.fill();
+        ctx.lineWidth = 3.5; ctx.strokeStyle = t.hidden ? T.pop2 : "#fff"; ctx.stroke();
+
+        /* 번호 원형 배지 */
+        ctx.beginPath(); ctx.arc(inX + 40, y + 40, 22, 0, Math.PI * 2);
+        ctx.fillStyle = t.hidden ? T.pop2 : T.pop; ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = '800 17px "Pretendard Variable", sans-serif';
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText(t.hidden ? "★" : String(t.no).padStart(2, "0"), inX + 40, y + 41);
+        ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+
+        const tx = inX + 78;
+        ctx.fillStyle = t.hidden ? "#fff" : T.ink;
+        ctx.font = '800 27px "Pretendard Variable", sans-serif';
+        ctx.fillText(t.title || "", tx, y + 40);
+        ctx.fillStyle = t.hidden ? T.pop2 : T.pop;
+        ctx.font = '600 18px "Pretendard Variable", sans-serif';
+        ctx.fillText(t.artist || "", tx, y + 66);
         if (t.note) {
-          ctx.fillStyle = t.hidden ? mix(T.rose, "#FFFFFF", 0.5) : mix(T.deep, "#FFFFFF", 0.36);
-          ctx.font = '400 21px "Nanum Myeongjo", AppleMyungjo, Batang, serif';
-          let ny = y + 54;
-          for (const ln of wrap(ctx, t.note, inW - 150)) { ny += 28; ctx.fillText(ln, inX + 62, ny); }
+          ctx.fillStyle = t.hidden ? rgba("#ffffff", 0.85) : rgba(T.ink, 0.75);
+          ctx.font = '400 21px "Nanum Myeongjo", serif';
+          let ny = y + 66;
+          for (const ln of wrap(ctx, t.note, inW - 140)) { ny += 30; ctx.fillText(ln, tx, ny); }
         }
-        y += rh + 12;
+        if (t.hidden) { star(inX + inW - 34, y + 26, 12, T.pop2); star(inX + inW - 58, y + 48, 8, T.pop3); }
+        y += rh + 14;
       });
 
-      /* 푸터 */
-      ctx.fillStyle = mix(T.deep, "#FFFFFF", 0.4);
-      ctx.font = '400 14px ui-monospace, Menlo, Consolas, monospace';
+      /* ── 푸터 ── */
+      y += 8;
       ctx.textAlign = "center";
-      ctx.fillText(solo ? "♫ SOLO TAPE MAKER" : "♫ PAIR TAPE MAKER", W / 2, H - 52);
+      ctx.fillStyle = T.pop;
+      ctx.font = '800 17px "Pretendard Variable", sans-serif';
+      ctx.fillText("♫ PAIR TAPE MAKER", W / 2, y + 20);
+      star(W / 2 - 120, y + 13, 9, T.pop2);
+      star(W / 2 + 120, y + 13, 9, T.pop3);
       ctx.textAlign = "left";
 
       const a = document.createElement("a");
       a.href = c.toDataURL("image/png");
-      a.download = solo
-        ? `${names[0] || "solo"}-mixtape.png`
-        : `${names[0] || "pair"}x${names[1] || "tape"}-mixtape.png`;
+      a.download = `${credit}-mixtape.png`;
       a.click();
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 1800);
