@@ -130,12 +130,15 @@ async function prepare(file, max = 760) {
     return { data: raw, mime };
   }
 }
-/* 단색 배경 자동 투명화 — 테두리에서 flood fill. 배경이 복잡하면 포기(null) */
+/* 단색 배경 자동 투명화.
+   흰 배경 + 창백한 피부/흰머리/흰옷 조합에서 인물까지 지워지는 사고를 막기 위해
+   (1) 허용 오차를 좁히고 (2) 지워진 비율이 과하면 통째로 포기하고
+   (3) 경계에 알파 그라데이션을 줘 흰 테두리를 없앤다. */
 async function makeCutout(photo) {
   const img = await loadImage(`data:${photo.mime};base64,${photo.data}`);
   const c = document.createElement("canvas");
   c.width = img.width; c.height = img.height;
-  const x = c.getContext("2d");
+  const x = c.getContext("2d", { willReadFrequently: true });
   x.drawImage(img, 0, 0);
   const d = x.getImageData(0, 0, c.width, c.height);
   const px = d.data, W = c.width, H = c.height;
@@ -146,7 +149,10 @@ async function makeCutout(photo) {
   for (let i = 0; i < W; i += si) { grab(i, 0); grab(i, H - 1); }
   for (let j = 0; j < H; j += sj) { grab(0, j); grab(W - 1, j); }
   const med = [0, 1, 2].map((ch) => samples.map((s) => s[ch]).sort((a, b) => a - b)[samples.length >> 1]);
-  const TOL2 = 46 * 46;
+
+  const TOL = 20;                 // 46 → 20. 흰색과 창백한 살색을 구분할 수 있는 폭
+  const TOL2 = TOL * TOL;
+  const SOFT2 = (TOL * 2.6) ** 2; // 이 사이 구간은 반투명으로 부드럽게
   const dist2 = (r, g, b) => {
     const dr = r - med[0], dg = g - med[1], db = b - med[2];
     return dr * dr + dg * dg + db * db;
@@ -155,21 +161,39 @@ async function makeCutout(photo) {
   if (uniform < 0.62) return null; // 배경이 단색이 아님 → 원본 유지
 
   const seen = new Uint8Array(W * H);
+  const removed = new Uint8Array(W * H);
   const q = [];
   for (let i = 0; i < W; i++) { q.push(i); q.push((H - 1) * W + i); }
   for (let j = 0; j < H; j++) { q.push(j * W); q.push(j * W + W - 1); }
+  let cut = 0;
   while (q.length) {
     const pI = q.pop();
     if (seen[pI]) continue;
     seen[pI] = 1;
     const k = pI * 4;
     if (dist2(px[k], px[k + 1], px[k + 2]) >= TOL2) continue;
-    px[k + 3] = 0;
+    removed[pI] = 1; cut++;
     const i = pI % W, j = (pI / W) | 0;
     if (i > 0) q.push(pI - 1);
     if (i < W - 1) q.push(pI + 1);
     if (j > 0) q.push(pI - W);
     if (j < H - 1) q.push(pI + W);
+  }
+
+  /* 안전장치: 화면의 62% 넘게 날아가면 인물까지 먹은 것으로 보고 포기 */
+  if (cut / (W * H) > 0.55) return null;
+
+  for (let pI = 0; pI < W * H; pI++) {
+    if (removed[pI]) { px[pI * 4 + 3] = 0; continue; }
+    /* 지워진 픽셀과 맞닿은 자리는 배경색에 가까운 만큼 반투명하게 — 흰 테두리 제거 */
+    const i = pI % W, j = (pI / W) | 0;
+    const edge =
+      (i > 0 && removed[pI - 1]) || (i < W - 1 && removed[pI + 1]) ||
+      (j > 0 && removed[pI - W]) || (j < H - 1 && removed[pI + W]);
+    if (!edge) continue;
+    const k = pI * 4;
+    const dd = dist2(px[k], px[k + 1], px[k + 2]);
+    if (dd < SOFT2) px[k + 3] = Math.round(255 * Math.min(1, Math.max(0, (dd - TOL2) / (SOFT2 - TOL2))));
   }
   x.putImageData(d, 0, 0);
   return c.toDataURL("image/png");
@@ -461,8 +485,8 @@ function Cassette({ pairLabel, mood, spinning, wind = 0, tint }) {
    프록시를 거치면 서버가 model 을 claude-sonnet-5 로 덮어쓰므로,
    배포본은 항상 Sonnet 5 로 동작합니다. 두 값이 달라도 정상입니다. */
 const API_ENDPOINT = "/.netlify/functions/mixtape";
+
 export default function PairMixtape() {
-  
   const [names, setNames] = useState(["", ""]);
   const [photos, setPhotos] = useState([null, null]);
   const [busy, setBusy] = useState([false, false]);
@@ -473,6 +497,7 @@ export default function PairMixtape() {
   const [swatches, setSwatches] = useState([]);
   const [shell, setShell] = useState(null); // 자캐 색에서 뽑은 카세트 셸
   const [freeTheme, setFreeTheme] = useState(""); // '기타' 직접 입력
+  const [autoCut, setAutoCut] = useState(true);   // 배경 자동 지우기
   const [flipped, setFlipped] = useState(false);
   const [forceNarrow, setForceNarrow] = useState(false); // 미리보기 토글
   const [autoNarrow, setAutoNarrow] = useState(false);   // 실기기 폭 감지
@@ -647,12 +672,13 @@ export default function PairMixtape() {
   /* 1장 모드: 플레이어 진입 시 배경 자동 투명화 */
   useEffect(() => {
     let alive = true;
+    if (!autoCut) { setCutout(null); return; }
     if (inPlayerRef.current && onePicRef.current && photos[0]) {
       makeCutout(photos[0]).then((r) => alive && setCutout(r)).catch(() => alive && setCutout(null));
     }
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, picMode, mode, photos[0]?.data]);
+  }, [status, picMode, mode, autoCut, photos[0]?.data]);
 
   function pick(axis, opt) {
     setAnswers((prev) => {
@@ -1447,6 +1473,12 @@ h1 em{font-style:normal;color:var(--pink)}
 .axis-label{font-size:13px;font-weight:600;margin-bottom:8px;display:flex;gap:8px;align-items:baseline}
 .axis-label span{font-family:var(--f-mono);font-size:10px;color:var(--dim)}
 .chips{display:flex;flex-wrap:wrap;gap:7px}
+.cut-tg{display:flex;gap:10px;align-items:flex-start;margin-top:14px;cursor:pointer;
+  border:1px solid var(--line);border-radius:12px;padding:12px 14px;transition:border-color .15s}
+.cut-tg:hover{border-color:var(--dim)}
+.cut-tg input{margin-top:2px;accent-color:var(--pink);width:16px;height:16px;flex:none}
+.cut-tg span{font-size:13px;color:var(--paper2);line-height:1.5}
+.cut-tg em{display:block;font-style:normal;font-size:11.5px;color:var(--dim);margin-top:3px}
 .free-in{margin-top:10px;width:100%;max-width:420px;background:transparent;color:var(--paper);
   border:1px solid var(--line);border-radius:10px;padding:10px 13px;font-family:inherit;font-size:13px;outline:none}
 .free-in:focus{border-color:var(--pink)}
@@ -1863,6 +1895,15 @@ h1 em{font-style:normal;color:var(--pink)}
                 </label>
               ))}
             </div>
+            {onePic && (
+              <label className="cut-tg">
+                <input type="checkbox" checked={autoCut} onChange={(e) => setAutoCut(e.target.checked)} />
+                <span>
+                  배경 자동 지우기
+                  <em>흰 배경 그림이면 인물만 오려서 테마 색 위에 올려요. 그림이 이상하게 잘리면 꺼주세요.</em>
+                </span>
+              </label>
+            )}
           </section>
 
           <section className="step">
