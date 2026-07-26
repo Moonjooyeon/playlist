@@ -461,8 +461,8 @@ function Cassette({ pairLabel, mood, spinning, wind = 0, tint }) {
    프록시를 거치면 서버가 model 을 claude-sonnet-5 로 덮어쓰므로,
    배포본은 항상 Sonnet 5 로 동작합니다. 두 값이 달라도 정상입니다. */
 const API_ENDPOINT = "/.netlify/functions/mixtape";
-
 export default function PairMixtape() {
+  
   const [names, setNames] = useState(["", ""]);
   const [photos, setPhotos] = useState([null, null]);
   const [busy, setBusy] = useState([false, false]);
@@ -1144,134 +1144,179 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
         rose: themeVars["--pp-rose"], deep: themeVars["--pp-deep"],
         card: themeVars["--pp-card"], soft: themeVars["--pp-soft"], lav: themeVars["--pp-lav"],
       };
+      const [hh, , ] = hexHsl(T.rose);
+      const paper = hslHex(hh, 0.18, 0.11);   // 어두운 슬리브 바탕
+      const paper2 = hslHex(hh, 0.24, 0.06);
+      const line = hslHex(hh, 0.2, 0.28);
+      const dim = hslHex(hh, 0.14, 0.62);
       try {
         await Promise.all([
-          document.fonts.load('800 52px "Pretendard Variable"'),
+          document.fonts.load('800 78px "Pretendard Variable"'),
           document.fonts.load('400 26px "Pretendard Variable"'),
-          document.fonts.load('400 24px "Nanum Myeongjo"'),
+          document.fonts.load('400 30px "Nanum Myeongjo"'),
         ]);
       } catch {}
 
-      const W = 880, H = 980;
+      const W = 900, M = 46;
+      const jS = 430;                       // 재킷 한 변
+      const topH = 70 + jS + 46;            // 상단(재킷+디스크) 영역
+      const mc = document.createElement("canvas").getContext("2d");
+      mc.font = '700 24px "Pretendard Variable", sans-serif';
+      const rowH = 62;
+      const H = topH + 118 + 54 + allTracks.length * rowH + 96;
+
       const c = document.createElement("canvas");
       c.width = W; c.height = H;
       const ctx = c.getContext("2d");
 
+      /* ── 슬리브 바탕: 어두운 단색 + 아주 옅은 아트워크 + 종이결 ── */
+      const g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, paper); g.addColorStop(1, paper2);
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
       const imA = await loadImage(`data:${photos[0].mime};base64,${photos[0].data}`);
       const imB = splitArt ? await loadImage(`data:${photos[1].mime};base64,${photos[1].data}`) : null;
       const imCut = cutout ? await loadImage(cutout) : null;
+
+      ctx.save();
+      ctx.globalAlpha = 0.16;
+      try { ctx.filter = "blur(28px)"; } catch {}
+      drawCover(ctx, imA, 0, 0, W, topH + 120);
+      ctx.restore();
+
       const texBg = await loadImage(TEX_BG);
-      const texMask = await loadImage(TEX_MASK);
-
-      /* 블러 배경 */
       ctx.save();
-      try { ctx.filter = "blur(20px)"; } catch {}
-      const s = Math.max((W * 1.16) / imA.width, (H * 1.16) / imA.height);
-      ctx.drawImage(imA, (W - imA.width * s) / 2, (H - imA.height * s) / 2, imA.width * s, imA.height * s);
-      ctx.restore();
-      ctx.fillStyle = rgba(T.deep, 0.42);
-      ctx.fillRect(0, 0, W, H);
-
-      /* 종이 판 — 그레인과 비네팅을 얹음 */
-      ctx.save();
-      ctx.globalAlpha = 0.55;
-      ctx.globalCompositeOperation = "overlay";
-      ctx.drawImage(texBg, 0, 0, W, H);
-      ctx.restore();
-      ctx.save();
-      ctx.globalAlpha = 0.3;
-      ctx.globalCompositeOperation = "multiply";
+      ctx.globalAlpha = 0.22; ctx.globalCompositeOperation = "overlay";
       ctx.drawImage(texBg, 0, 0, W, H);
       ctx.restore();
 
-      /* 디스크 */
-      const dR = 186, dX = 610, dY = 400;
+      /* ── 디스크 (재킷 뒤에서 빠져나온 모양) ── */
+      const jX = M + 24, jY = 70;
+      const dR = jS * 0.46, dX = jX + jS + dR * 0.42, dY = jY + jS / 2;
       const dg = ctx.createRadialGradient(dX - 40, dY - 50, 10, dX, dY, dR);
-      dg.addColorStop(0, "#191919"); dg.addColorStop(0.6, "#050505"); dg.addColorStop(1, "#141414");
-      ctx.beginPath(); ctx.arc(dX, dY, dR, 0, Math.PI * 2);
-      ctx.fillStyle = dg; ctx.fill();
-      ctx.strokeStyle = "rgba(255,255,255,.045)"; ctx.lineWidth = 1;
-      for (let r = dR * 0.94; r > dR * 0.34; r -= 3.4) {
+      dg.addColorStop(0, "#1c1c1c"); dg.addColorStop(0.55, "#070707"); dg.addColorStop(1, "#151515");
+      ctx.beginPath(); ctx.arc(dX, dY, dR, 0, Math.PI * 2); ctx.fillStyle = dg; ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,.05)"; ctx.lineWidth = 1;
+      for (let r = dR * 0.95; r > dR * 0.36; r -= 3.6) {
         ctx.beginPath(); ctx.arc(dX, dY, r, 0, Math.PI * 2); ctx.stroke();
       }
-      ctx.beginPath(); ctx.arc(dX, dY, dR * 0.31, 0, Math.PI * 2);
+      ctx.beginPath(); ctx.arc(dX, dY, dR * 0.3, 0, Math.PI * 2);
       ctx.fillStyle = T.rose; ctx.fill();
       ctx.fillStyle = "#fff";
-      ctx.font = '400 15px ui-monospace, Menlo, Consolas, monospace';
+      ctx.font = '700 14px ui-monospace, Menlo, monospace';
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(track.hidden ? "★" : `TR.${String(track.no).padStart(2, "0")}`, dX, dY);
+      ctx.fillText(solo ? "SOLO" : "PAIR", dX, dY - 9);
+      ctx.font = '400 11px ui-monospace, Menlo, monospace';
+      ctx.fillText(`${allTracks.length} TRACKS`, dX, dY + 9);
       ctx.beginPath(); ctx.arc(dX, dY, 7, 0, Math.PI * 2);
       ctx.fillStyle = "#0a0a0a"; ctx.fill();
       ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
 
-      /* 재킷 */
-      const jS = 400, jX = 150, jY = dY - jS / 2;
+      /* ── 재킷 ── */
       ctx.save();
-      ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 30; ctx.shadowOffsetX = 8; ctx.shadowOffsetY = 12;
-      rr(ctx, jX, jY, jS, jS, 5); ctx.fillStyle = T.card; ctx.fill();
+      ctx.shadowColor = "rgba(0,0,0,.6)"; ctx.shadowBlur = 34; ctx.shadowOffsetX = 6; ctx.shadowOffsetY = 14;
+      ctx.fillStyle = T.card; ctx.fillRect(jX, jY, jS, jS);
       ctx.restore();
       ctx.save();
-      rr(ctx, jX, jY, jS, jS, 5); ctx.clip();
+      ctx.beginPath(); ctx.rect(jX, jY, jS, jS); ctx.clip();
       if (splitArt) {
-        drawCover(ctx, imA, jX, jY, jS * 0.505, jS);
-        drawCover(ctx, imB, jX + jS * 0.495, jY, jS * 0.505, jS);
+        drawCover(ctx, imA, jX, jY, jS / 2, jS);
+        drawCover(ctx, imB, jX + jS / 2, jY, jS / 2, jS);
+        ctx.fillStyle = "rgba(255,255,255,.75)";
+        ctx.fillRect(jX + jS / 2 - 1.5, jY, 3, jS);
       } else if (imCut) {
         const bg = ctx.createLinearGradient(jX, jY, jX + jS, jY + jS);
         bg.addColorStop(0, T.soft); bg.addColorStop(1, T.lav);
         ctx.fillStyle = bg; ctx.fillRect(jX, jY, jS, jS);
-        const k = Math.min((jS * 0.92) / imCut.width, jS / imCut.height);
-        ctx.drawImage(imCut, jX + (jS - imCut.width * k) / 2, jY + jS - imCut.height * k,
-          imCut.width * k, imCut.height * k);
-      } else {
-        drawCover(ctx, imA, jX, jY, jS, jS);
-      }
-      /* 재킷 위 텍스트 */
-      ctx.textAlign = "right";
-      ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 10;
-      ctx.fillStyle = "#fff";
-      ctx.font = '800 30px "Pretendard Variable", Pretendard, system-ui, sans-serif';
-      ctx.fillText(result.tapeTitle || "", jX + jS - 18, jY + 42);
-      ctx.font = '400 13px ui-monospace, Menlo, Consolas, monospace';
-      ctx.fillStyle = "rgba(255,255,255,.88)";
-      ctx.fillText("@" + credit, jX + jS - 16, jY + jS - 14);
-      ctx.shadowBlur = 0;
-      ctx.restore();
-      ctx.textAlign = "left";
+        const k = Math.min((jS * 0.9) / imCut.width, jS / imCut.height);
+        ctx.drawImage(imCut, jX + (jS - imCut.width * k) / 2, jY + jS - imCut.height * k, imCut.width * k, imCut.height * k);
+      } else drawCover(ctx, imA, jX, jY, jS, jS);
 
-      /* 대형 타이포 */
+      /* 제목은 그림 위가 아니라 하단 띠 안에 — 겹침·잘림 방지 */
+      const bandH = 76;
+      const bg2 = ctx.createLinearGradient(0, jY + jS - bandH, 0, jY + jS);
+      bg2.addColorStop(0, "rgba(0,0,0,0)"); bg2.addColorStop(0.45, "rgba(0,0,0,.72)"); bg2.addColorStop(1, "rgba(0,0,0,.86)");
+      ctx.fillStyle = bg2; ctx.fillRect(jX, jY + jS - bandH, jS, bandH);
+      ctx.fillStyle = "#fff";
+      let ts = 30;
+      ctx.font = `800 ${ts}px "Pretendard Variable", sans-serif`;
+      while (ctx.measureText(result.tapeTitle || "").width > jS - 36 && ts > 16) {
+        ts -= 2; ctx.font = `800 ${ts}px "Pretendard Variable", sans-serif`;
+      }
+      ctx.fillText(result.tapeTitle || "", jX + 18, jY + jS - 30);
+      ctx.font = '400 12px ui-monospace, Menlo, monospace';
+      ctx.fillStyle = "rgba(255,255,255,.72)";
+      ctx.fillText("@" + credit, jX + 18, jY + jS - 12);
+      ctx.restore();
+      ctx.strokeStyle = "rgba(255,255,255,.14)"; ctx.lineWidth = 1;
+      ctx.strokeRect(jX + 0.5, jY + 0.5, jS - 1, jS - 1);
+
+      /* ── 대형 이름 타이포 ── */
+      let y = topH + 66;
       const n1 = solo ? names[0] || "SOLO" : names[0] || "PAIR";
       const n2 = solo ? "TAPE" : names[1] || "TAPE";
-      let fs = 84;
+      let fs = 80;
       const setF = () => (ctx.font = `700 ${fs}px "Nanum Myeongjo", AppleMyungjo, Batang, serif`);
       setF();
-      while (ctx.measureText(n1 + n2).width > W - 120 && fs > 30) { fs -= 3; setF(); }
+      while (ctx.measureText(n1 + n2).width > W - 140 && fs > 30) { fs -= 3; setF(); }
       const w1 = ctx.measureText(n1).width, w2 = ctx.measureText(n2).width;
-      const startX = (W - (w1 + w2)) / 2, baseY = 730;
-      ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = 18;
-      ctx.fillStyle = "#fff";
-      ctx.fillText(n1, startX, baseY);
-      ctx.fillStyle = T.rose;
-      ctx.fillText(n2, startX + w1, baseY);
-      ctx.shadowBlur = 0;
+      const sx = (W - (w1 + w2)) / 2;
+      ctx.fillStyle = "#fff"; ctx.fillText(n1, sx, y);
+      ctx.fillStyle = T.rose; ctx.fillText(n2, sx + w1, y);
 
-      /* 현재 곡 + 워터마크 */
+      /* 부제 */
+      y += 40;
       ctx.textAlign = "center";
-      ctx.fillStyle = "rgba(255,255,255,.92)";
-      ctx.font = '700 20px "Pretendard Variable", Pretendard, system-ui, sans-serif';
-      ctx.fillText(`${track.title}`, W / 2, baseY + 46);
-      ctx.fillStyle = "rgba(255,255,255,.62)";
-      ctx.font = '400 14px ui-monospace, Menlo, Consolas, monospace';
-      ctx.fillText(track.artist || "", W / 2, baseY + 70);
-      ctx.fillStyle = "rgba(255,255,255,.45)";
-      ctx.font = '400 13px ui-monospace, Menlo, Consolas, monospace';
-      ctx.fillText(solo ? "♫ SOLO TAPE MAKER" : "♫ PAIR TAPE MAKER", W / 2, H - 40);
+      ctx.fillStyle = dim;
+      ctx.font = '400 22px "Nanum Myeongjo", AppleMyungjo, Batang, serif';
+      ctx.fillText(result.tagline || "", W / 2, y);
       ctx.textAlign = "left";
 
-      /* 프레임 + 워시테이프 (밝은 색으로 칠해 어두운 배경 위에 얹음) */
-      ctx.save();
-      ctx.globalAlpha = 0.82;
-      ctx.drawImage(tintMask(texMask, W, H, "#FFFFFF"), 0, 0);
-      ctx.restore();
+      /* ── 트랙리스트 (뒷면 인쇄) ── */
+      y += 54;
+      ctx.strokeStyle = line; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(M, y); ctx.lineTo(W - M, y); ctx.stroke();
+      ctx.fillStyle = dim;
+      ctx.font = '400 12px ui-monospace, Menlo, monospace';
+      ctx.textAlign = "center";
+      ctx.fillStyle = paper;
+      ctx.fillRect(W / 2 - 62, y - 9, 124, 18);
+      ctx.fillStyle = dim;
+      ctx.fillText("T R A C K L I S T", W / 2, y + 4);
+      ctx.textAlign = "left";
+      y += 42;
+
+      allTracks.forEach((t) => {
+        ctx.fillStyle = t.hidden ? T.rose : dim;
+        ctx.font = '400 15px ui-monospace, Menlo, monospace';
+        ctx.fillText(t.hidden ? "★" : String(t.no).padStart(2, "0"), M + 6, y);
+
+        ctx.fillStyle = t.hidden ? T.rose : "#fff";
+        ctx.font = '700 24px "Pretendard Variable", sans-serif';
+        let title = t.title || "";
+        while (ctx.measureText(title).width > W - M * 2 - 240 && title.length > 4) title = title.slice(0, -2);
+        if (title !== t.title) title += "…";
+        ctx.fillText(title, M + 52, y);
+
+        ctx.fillStyle = dim;
+        ctx.font = '500 16px "Pretendard Variable", sans-serif';
+        ctx.textAlign = "right";
+        ctx.fillText(t.artist || "", W - M - 6, y);
+        ctx.textAlign = "left";
+
+        ctx.strokeStyle = line; ctx.lineWidth = 1;
+        ctx.setLineDash([1, 5]);
+        ctx.beginPath(); ctx.moveTo(M + 6, y + 20); ctx.lineTo(W - M - 6, y + 20); ctx.stroke();
+        ctx.setLineDash([]);
+        y += rowH;
+      });
+
+      /* ── 푸터 ── */
+      ctx.textAlign = "center";
+      ctx.fillStyle = dim;
+      ctx.font = '400 13px ui-monospace, Menlo, monospace';
+      ctx.fillText(solo ? "♫ SOLO TAPE MAKER" : "♫ PAIR TAPE MAKER", W / 2, H - 38);
+      ctx.textAlign = "left";
 
       const a = document.createElement("a");
       a.href = c.toDataURL("image/png");
@@ -2016,7 +2061,6 @@ h1 em{font-style:normal;color:var(--pink)}
               />
               <div className="v-tint" aria-hidden="true" />
               <div className="v-grain" aria-hidden="true" />
-              <div className="v-frame" aria-hidden="true" />
               <div className="v-set">
                 <div className={`v-disc ${playing ? "spinning" : ""}`} aria-hidden="true">
                   <div className="v-grooves" />
