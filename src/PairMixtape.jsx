@@ -460,7 +460,7 @@ function Cassette({ pairLabel, mood, spinning, wind = 0, tint }) {
    아래 fetch 본문의 model 값(claude-sonnet-4-6)은 아티팩트 미리보기 전용입니다.
    프록시를 거치면 서버가 model 을 claude-sonnet-5 로 덮어쓰므로,
    배포본은 항상 Sonnet 5 로 동작합니다. 두 값이 달라도 정상입니다. */
-const API_ENDPOINT = "https://api.anthropic.com/v1/messages";
+const API_ENDPOINT = "/.netlify/functions/mixtape";
 
 export default function PairMixtape() {
   const [names, setNames] = useState(["", ""]);
