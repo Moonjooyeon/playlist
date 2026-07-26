@@ -249,20 +249,6 @@ const BURN_STEPS = [
   "테이프에 굽는 중",
 ];
 
-/* iTunes Search JSONP — CORS 없이 곡 30초 프리뷰 URL 조회 (배포 환경에서 동작) */
-function jsonp(url, timeout = 6000) {
-  return new Promise((res, rej) => {
-    const cb = "itcb_" + Math.random().toString(36).slice(2);
-    const el = document.createElement("script");
-    const t = setTimeout(() => { cleanup(); rej(new Error("timeout")); }, timeout);
-    function cleanup() { try { delete window[cb]; } catch {} el.remove(); clearTimeout(t); }
-    window[cb] = (d) => { cleanup(); res(d); };
-    el.onerror = () => { cleanup(); rej(new Error("load")); };
-    el.src = url + "&callback=" + cb;
-    document.head.appendChild(el);
-  });
-}
-
 /* 곡별 가짜 재생 길이 (제목에서 결정적으로 유도, 2:20~4:30) */
 function fakeDur(t) {
   let h = 0;
@@ -498,6 +484,10 @@ export default function PairMixtape() {
   const [shell, setShell] = useState(null); // 자캐 색에서 뽑은 카세트 셸
   const [freeTheme, setFreeTheme] = useState(""); // '기타' 직접 입력
   const [autoCut, setAutoCut] = useState(true);   // 배경 자동 지우기
+  const DEF_FOCUS = { x: 0.5, y: 0.5, z: 1 };
+  const [focus, setFocus] = useState([{ ...DEF_FOCUS }, { ...DEF_FOCUS }]);
+  const [panned, setPanned] = useState(false);
+  const drag = useRef(null);
   const [flipped, setFlipped] = useState(false);
   const [forceNarrow, setForceNarrow] = useState(false); // 미리보기 토글
   const [autoNarrow, setAutoNarrow] = useState(false);   // 실기기 폭 감지
@@ -517,7 +507,6 @@ export default function PairMixtape() {
 
   /* 실제 30초 프리뷰 재생 */
   const audioRef = useRef(null);
-  const [previews, setPreviews] = useState({}); // idx → url | null(없음)
   const [live, setLive] = useState(false); // 지금 실제 오디오가 나오는 중인지
   const liveRef = useRef(false);
   liveRef.current = live;
@@ -567,27 +556,6 @@ export default function PairMixtape() {
     return () => clearInterval(id);
   }, [playing, track, dur, live, allTracks.length]);
 
-  /* 프리뷰 조회 + 재생 */
-  async function findPreview(i) {
-    if (previews[i] !== undefined) return previews[i];
-    const t = allTracks[i];
-    if (!t) return null;
-    try {
-      const d = await jsonp(
-        `https://itunes.apple.com/search?media=music&entity=song&limit=3&term=${encodeURIComponent(
-          (t.artist || "") + " " + (t.title || "")
-        )}`
-      );
-      const hit = (d.results || []).find((r) => r.previewUrl);
-      const url = hit ? hit.previewUrl : null;
-      setPreviews((p) => ({ ...p, [i]: url }));
-      return url;
-    } catch {
-      setPreviews((p) => ({ ...p, [i]: null }));
-      return null;
-    }
-  }
-
   useEffect(() => {
     if (!audioRef.current && typeof Audio !== "undefined") audioRef.current = new Audio();
     const a = audioRef.current;
@@ -595,7 +563,7 @@ export default function PairMixtape() {
     let gone = false;
     if (!playing) { a.pause(); setLive(false); return; }
     (async () => {
-      const url = await findPreview(cur);
+      const url = allTracks[cur]?.previewUrl || null;
       if (gone) return;
       if (!url) { setLive(false); return; }
       if (a.src !== url) a.src = url;
@@ -706,6 +674,8 @@ export default function PairMixtape() {
       const img = await prepare(file);
       setPhotos((p) => p.map((v, i) => (i === idx ? img : v)));
       if (idx === 0) setCutout(null);
+      setFocus((f) => f.map((v, i) => (i === idx ? { ...DEF_FOCUS } : v)));
+      setFocus((f) => f.map((v, i) => (i === idx ? { x: 0.5, y: 0.5 } : v)));
     } catch (err) {
       setError(ERRORS[err?.message] || "이 이미지를 처리하지 못했습니다. 다른 파일로 시도해 주세요.");
     } finally {
@@ -721,7 +691,6 @@ export default function PairMixtape() {
     setCur(0);
     setPos(0);
     setLiked({});
-    setPreviews({});
     setLive(false);
     audioRef.current?.pause();
 
@@ -763,7 +732,10 @@ ${imgIntro}
 ${narrative}
 
 ${body}
-- 반드시 실제로 존재하는 곡만 고를 것. 확실하지 않으면 더 잘 아는 곡으로 대체하라.
+- 반드시 실제로 발매된 곡만 고를 것. 스트리밍에서 바로 찾을 수 있을 만큼 널리 알려진 곡으로 한정한다.
+- 곡 제목과 아티스트명은 발매 당시의 공식 표기 그대로 적어라. 번역하거나 바꿔 적지 말 것.
+- 조금이라도 확신이 서지 않으면 그 곡은 버리고, 네가 확실히 아는 곡으로 대체하라.
+  분위기가 덜 맞더라도 존재하지 않는 곡보다 낫다.
 - 가사는 절대 인용하지 말 것.
 - note는 이 곡이 둘의 어떤 지점을 담는지 한국어 한 문장, 30자 이내.
 - 아티스트 중복 금지.
@@ -818,12 +790,16 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "request failed");
-      const raw =
-        typeof data.text === "string"
-          ? data.text
-          : (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("");
-      const text = raw.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(text);
+      let parsed;
+      if (data.result && typeof data.result === "object") {
+        parsed = data.result; // 프록시가 실존 확인·미리듣기 URL까지 붙여 보냄
+      } else {
+        const raw =
+          typeof data.text === "string"
+            ? data.text
+            : (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("");
+        parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
+      }
       if (!parsed.tracks?.length) throw new Error("shape");
       setResult(parsed);
       setStatus("player");
@@ -836,6 +812,42 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
       setStatus("error");
     }
   }
+
+  /* 아트워크를 끌어 초점 이동 — 두 장이면 누른 쪽 그림만 */
+  function panStart(e) {
+    const box = e.currentTarget.getBoundingClientRect();
+    const px = (e.touches ? e.touches[0].clientX : e.clientX) - box.left;
+    const idx = splitArt && px > box.width / 2 ? 1 : 0;
+    drag.current = {
+      idx,
+      x: e.touches ? e.touches[0].clientX : e.clientX,
+      y: e.touches ? e.touches[0].clientY : e.clientY,
+      w: splitArt ? box.width / 2 : box.width,
+      h: box.height,
+      f: { ...focus[idx] },
+    };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  }
+  function panMove(e) {
+    const d = drag.current;
+    if (!d) return;
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    const nx = Math.max(0, Math.min(1, d.f.x - (cx - d.x) / d.w));
+    const ny = Math.max(0, Math.min(1, d.f.y - (cy - d.y) / d.h));
+    setFocus((f) => f.map((v, i) => (i === d.idx ? { x: nx, y: ny } : v)));
+    if (!panned && (Math.abs(cx - d.x) > 4 || Math.abs(cy - d.y) > 4)) setPanned(true);
+  }
+  function panEnd() { drag.current = null; }
+  const resetFocus = () => setFocus([{ ...DEF_FOCUS }, { ...DEF_FOCUS }]);
+
+  const setZoom = (i, z) =>
+    setFocus((f) => f.map((v, k) => (k === i ? { ...v, z: Number(z) } : v)));
+  const imgStyle = (i) => ({
+    objectPosition: `${focus[i].x * 100}% ${focus[i].y * 100}%`,
+    transform: `scale(${focus[i].z ?? 1})`,
+    transformOrigin: `${focus[i].x * 100}% ${focus[i].y * 100}%`,
+  });
 
   function seek(e) {
     if (!barRef.current || !dur) return;
@@ -883,10 +895,14 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
     ctx.arcTo(x, y, x + w, y, r);
     ctx.closePath();
   }
-  function drawCover(ctx, img, dx, dy, dw, dh) {
-    const s = Math.max(dw / img.width, dh / img.height);
+  /* f = {x,y} 0~1 초점. CSS object-position 과 같은 규칙이라 화면과 PNG가 일치한다. */
+  function drawCover(ctx, img, dx, dy, dw, dh, f) {
+    const fx = f?.x ?? 0.5, fy = f?.y ?? 0.5, fz = f?.z ?? 1;
+    const s = Math.max(dw / img.width, dh / img.height) * fz;
     const sw = dw / s, sh = dh / s;
-    ctx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, dx, dy, dw, dh);
+    const sx = Math.max(0, Math.min(img.width - sw, fx * (img.width - sw)));
+    const sy = Math.max(0, Math.min(img.height - sh, fy * (img.height - sh)));
+    ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
   }
   function wrap(ctx, text, maxW) {
     const out = [];
@@ -1007,8 +1023,8 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
           loadImage(`data:${photos[0].mime};base64,${photos[0].data}`),
           loadImage(`data:${photos[1].mime};base64,${photos[1].data}`),
         ]);
-        drawCover(ctx, imA, inX, y, inW * 0.5, artH);
-        drawCover(ctx, imB, inX + inW * 0.5, y, inW * 0.5, artH);
+        drawCover(ctx, imA, inX, y, inW * 0.5, artH, focus[0]);
+        drawCover(ctx, imB, inX + inW * 0.5, y, inW * 0.5, artH, focus[1]);
       } else {
         const im = await loadImage(cutout || `data:${photos[0].mime};base64,${photos[0].data}`);
         if (cutout) {
@@ -1017,7 +1033,7 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
           ctx.fillStyle = bg2; ctx.fillRect(inX, y, inW, artH);
           const k = Math.min((inW * 0.8) / im.width, artH / im.height);
           ctx.drawImage(im, inX + (inW - im.width * k) / 2, y + artH - im.height * k, im.width * k, im.height * k);
-        } else drawCover(ctx, im, inX, y, inW, artH);
+        } else drawCover(ctx, im, inX, y, inW, artH, focus[0]);
       }
       ctx.restore();
       ctx.lineWidth = 9; ctx.strokeStyle = "#fff";
@@ -1047,12 +1063,17 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
       y += 74;
 
       /* 부제 + 페어명 배지 */
-      ctx.font = '400 26px "Nanum Myeongjo", serif';
-      ctx.fillStyle = T.ink;
-      ctx.fillText(result.tagline || "", inX, y + 20);
       const badge = `${solo ? "SOLO" : "PAIR"} · ${label}`;
       ctx.font = '700 15px "Pretendard Variable", sans-serif';
       const bw = ctx.measureText(badge).width + 30;
+      ctx.font = '400 26px "Nanum Myeongjo", serif';
+      ctx.fillStyle = T.ink;
+      let tag = result.tagline || "";
+      const tagMax = inW - bw - 24;
+      while (ctx.measureText(tag).width > tagMax && tag.length > 4) tag = tag.slice(0, -2);
+      if (tag !== (result.tagline || "")) tag += "…";
+      ctx.fillText(tag, inX, y + 20);
+      ctx.font = '700 15px "Pretendard Variable", sans-serif';
       rr(ctx, inX + inW - bw, y - 2, bw, 32, 16); ctx.fillStyle = T.pop2; ctx.fill();
       ctx.fillStyle = "#fff"; ctx.textAlign = "center";
       ctx.fillText(badge, inX + inW - bw / 2, y + 20);
@@ -1246,8 +1267,8 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
       ctx.save();
       ctx.beginPath(); ctx.rect(jX, jY, jS, jS); ctx.clip();
       if (splitArt) {
-        drawCover(ctx, imA, jX, jY, jS / 2, jS);
-        drawCover(ctx, imB, jX + jS / 2, jY, jS / 2, jS);
+        drawCover(ctx, imA, jX, jY, jS / 2, jS, focus[0]);
+        drawCover(ctx, imB, jX + jS / 2, jY, jS / 2, jS, focus[1]);
         ctx.fillStyle = "rgba(255,255,255,.75)";
         ctx.fillRect(jX + jS / 2 - 1.5, jY, 3, jS);
       } else if (imCut) {
@@ -1256,7 +1277,7 @@ theme는 그림의 실제 색과 분위기에서 뽑아라.
         ctx.fillStyle = bg; ctx.fillRect(jX, jY, jS, jS);
         const k = Math.min((jS * 0.9) / imCut.width, jS / imCut.height);
         ctx.drawImage(imCut, jX + (jS - imCut.width * k) / 2, jY + jS - imCut.height * k, imCut.width * k, imCut.height * k);
-      } else drawCover(ctx, imA, jX, jY, jS, jS);
+      } else drawCover(ctx, imA, jX, jY, jS, jS, focus[0]);
 
       /* 제목은 그림 위가 아니라 하단 띠 안에 — 겹침·잘림 방지 */
       const bandH = 76;
@@ -1564,6 +1585,11 @@ h1 em{font-style:normal;color:var(--pink)}
 .art-a{left:0}
 .art-b{right:0}
 .art-full{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.pannable{cursor:grab;touch-action:none}
+.pannable:active{cursor:grabbing}
+.pan-hint{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);z-index:5;
+  font-size:11px;color:#fff;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);
+  padding:5px 12px;border-radius:999px;pointer-events:none;white-space:nowrap}
 .art-cut{position:absolute;inset:0;display:flex;align-items:flex-end;justify-content:center;
   background:
     radial-gradient(circle at 20% 18%, color-mix(in srgb, var(--pp-rose) 16%, transparent) 0%, transparent 42%),
@@ -1661,6 +1687,11 @@ h1 em{font-style:normal;color:var(--pink)}
   width:38px;height:38px;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;
   font-size:17px;box-shadow:0 4px 12px color-mix(in srgb, var(--pp-deep) 30%, transparent);animation:beat 1.6s ease-in-out infinite}
 @keyframes beat{0%,100%{transform:translate(-50%,-50%) scale(1)}12%{transform:translate(-50%,-50%) scale(1.14)}24%{transform:translate(-50%,-50%) scale(1)}}
+.zoomrow{display:flex;gap:14px;padding:14px 26px 0}
+.zoomctl{flex:1;display:flex;align-items:center;gap:9px;min-width:0}
+.zoomctl span{font-size:11px;color:var(--pp-mut);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;max-width:74px;font-weight:600}
+.zoomctl input{flex:1;min-width:0;accent-color:var(--pp-rose);height:3px}
 .hid-veil{position:absolute;inset:0;background:color-mix(in srgb, var(--pp-deep) 68%, transparent);backdrop-filter:blur(7px);z-index:4;
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:color-mix(in srgb, var(--pp-card) 88%, var(--pp-rose))}
 .hid-veil b{font-family:var(--f-mono);font-size:11px;letter-spacing:.22em}
@@ -1725,6 +1756,9 @@ h1 em{font-style:normal;color:var(--pink)}
 .trow.hid .tr-no{color:var(--pp-lav)}
 .tr-body{flex:1;min-width:0}
 .tr-title{font-size:14px;font-weight:700;color:var(--pp-deep);line-height:1.3}
+.unver{margin-left:7px;font-size:9.5px;font-weight:700;letter-spacing:.04em;padding:2px 6px;
+  border-radius:999px;background:color-mix(in srgb, var(--pp-deep) 12%, transparent);
+  color:var(--pp-mut);vertical-align:middle}
 .tr-artist{font-size:11.5px;color:var(--pp-mut);margin-top:1px}
 .trow.hid .tr-artist{color:color-mix(in srgb, var(--pp-deep) 30%, #fff)}
 .tr-note{font-family:var(--f-serif);font-size:13px;color:color-mix(in srgb, var(--pp-deep) 62%, #fff);margin-top:4px;line-height:1.55}
@@ -1779,6 +1813,7 @@ h1 em{font-style:normal;color:var(--pink)}
 .narrow .pcard{border-radius:20px}
 .narrow .artwork{margin:14px 13px 0;border-radius:14px}
 .narrow .now{padding:16px 18px 0}
+.narrow .zoomrow{padding:12px 18px 0;gap:10px}
 .narrow .now-title{font-size:20px}
 .narrow .now-note{font-size:14px}
 .narrow .bar-wrap{padding:14px 18px 0}
@@ -2011,11 +2046,18 @@ h1 em{font-style:normal;color:var(--pink)}
             <div className="scallop" aria-hidden="true" />
 
             {/* 아트워크 */}
-            <div className="artwork">
+            <div
+              className="artwork pannable"
+              onPointerDown={panStart}
+              onPointerMove={panMove}
+              onPointerUp={panEnd}
+              onPointerCancel={panEnd}
+              onDoubleClick={resetFocus}
+            >
               {splitArt ? (
                 <>
-                  <img className="art-half art-a" src={`data:${photos[0].mime};base64,${photos[0].data}`} alt={nameA} />
-                  <img className="art-half art-b" src={`data:${photos[1].mime};base64,${photos[1].data}`} alt={nameB} />
+                  <img className="art-half art-a" style={imgStyle(0)} src={`data:${photos[0].mime};base64,${photos[0].data}`} alt={nameA} />
+                  <img className="art-half art-b" style={imgStyle(1)} src={`data:${photos[1].mime};base64,${photos[1].data}`} alt={nameB} />
                   <span className="seam" aria-hidden="true" />
                   <span className="seam-heart" aria-hidden="true">🎀</span>
                 </>
@@ -2024,14 +2066,29 @@ h1 em{font-style:normal;color:var(--pink)}
                   <img src={cutout} alt={label} />
                 </div>
               ) : (
-                <img className="art-full" src={`data:${photos[0].mime};base64,${photos[0].data}`} alt={label} />
+                <img className="art-full" style={imgStyle(0)} src={`data:${photos[0].mime};base64,${photos[0].data}`} alt={label} />
               )}
+              {!panned && <span className="pan-hint">끌어서 위치 조정 · 더블클릭 초기화</span>}
               {track.hidden && (
                 <div className="hid-veil">
                   <b>HIDDEN TRACK</b>
                   <span>아무도 들려준 적 없는 곡</span>
                 </div>
               )}
+            </div>
+
+            <div className="zoomrow">
+              {(splitArt ? [0, 1] : cutout ? [] : [0]).map((i) => (
+                <label className="zoomctl" key={i}>
+                  <span>{splitArt ? (i === 0 ? nameA : nameB) : "크기"}</span>
+                  <input
+                    type="range" min="1" max="2.4" step="0.02"
+                    value={focus[i].z ?? 1}
+                    onChange={(e) => setZoom(i, e.target.value)}
+                    aria-label={`${splitArt ? (i === 0 ? nameA : nameB) : "그림"} 확대`}
+                  />
+                </label>
+              ))}
             </div>
 
             <div className="now">
@@ -2118,13 +2175,13 @@ h1 em{font-style:normal;color:var(--pink)}
                   <span className="vj-face vj-front">
                     {splitArt ? (
                       <>
-                        <img className="vj-half vj-a" src={`data:${photos[0].mime};base64,${photos[0].data}`} alt={nameA} />
-                        <img className="vj-half vj-b" src={`data:${photos[1].mime};base64,${photos[1].data}`} alt={nameB} />
+                        <img className="vj-half vj-a" style={imgStyle(0)} src={`data:${photos[0].mime};base64,${photos[0].data}`} alt={nameA} />
+                        <img className="vj-half vj-b" style={imgStyle(1)} src={`data:${photos[1].mime};base64,${photos[1].data}`} alt={nameB} />
                       </>
                     ) : cutout ? (
                       <span className="vj-cut"><img src={cutout} alt={label} /></span>
                     ) : (
-                      <img className="vj-full" src={`data:${photos[0].mime};base64,${photos[0].data}`} alt={label} />
+                      <img className="vj-full" style={imgStyle(0)} src={`data:${photos[0].mime};base64,${photos[0].data}`} alt={label} />
                     )}
                     <span className="vj-title">{result.tapeTitle}</span>
                     <span className="vj-credit">@{credit}</span>
@@ -2192,7 +2249,10 @@ h1 em{font-style:normal;color:var(--pink)}
                 onClick={() => { setCur(i); setPlaying(true); }}>
                 <span className="tr-no">{t.hidden ? "★" : String(t.no).padStart(2, "0")}</span>
                 <span className="tr-body">
-                  <span className="tr-title" style={{ display: "block" }}>{t.title}</span>
+                  <span className="tr-title" style={{ display: "block" }}>
+                    {t.title}
+                    {t.verified === false && <span className="unver">미확인</span>}
+                  </span>
                   <span className="tr-artist" style={{ display: "block" }}>{t.artist}</span>
                   {t.note && <span className="tr-note" style={{ display: "block" }}>{t.note}</span>}
                 </span>
@@ -2213,7 +2273,7 @@ h1 em{font-style:normal;color:var(--pink)}
             <button className="pbtn ghost" onClick={copy}>{copied ? "복사됨 ♡" : "트랙리스트 복사"}</button>
             <button className="pbtn ghost" onClick={generate}>다시 굽기</button>
           </div>
-          <p className="p-note">곡마다 30초 미리듣기가 재생돼요 (프리뷰가 없는 곡은 무음). 전곡 감상은 곡 옆 YT 버튼으로. 없는 곡이 섞일 수 있으니 한 번씩 확인해 주세요.</p>
+          <p className="p-note">곡마다 30초 미리듣기가 재생돼요. '미확인' 표시는 애플 뮤직에서 찾지 못한 곡이라 실제로 없는 곡일 수 있어요. 전곡 감상은 곡 옆 YT 버튼으로.</p>
         </div>
       )}
 

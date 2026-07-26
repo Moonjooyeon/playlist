@@ -37,6 +37,71 @@ function tooMany(ip) {
   return null;
 }
 
+
+/* ── iTunes 카탈로그 대조 ──
+   모델이 없는 곡을 지어내는 경우가 있어 실제 존재 여부를 서버에서 확인한다.
+   찾으면 공식 표기로 교정하고 30초 미리듣기 URL을 붙인다.
+   클라이언트에서 JSONP로 하던 걸 서버로 옮겨 CORS·CSP 문제도 함께 제거. */
+const norm = (x) =>
+  (x || "").toLowerCase().normalize("NFKC").replace(/[\s\-–—_'"`.,!?()\[\]&]/g, "");
+
+async function lookup(t) {
+  const term = `${t.artist || ""} ${t.title || ""}`.trim();
+  if (!term) return { ...t, verified: false, previewUrl: null };
+
+  for (const country of ["KR", "US"]) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 4000);
+    try {
+      const u =
+        "https://itunes.apple.com/search?media=music&entity=song&limit=6" +
+        `&country=${country}&term=${encodeURIComponent(term)}`;
+      const r = await fetch(u, { signal: ac.signal });
+      if (!r.ok) continue;
+      const d = await r.json();
+      const list = d.results || [];
+      const wt = norm(t.title), wa = norm(t.artist);
+
+      const strong = list.find((x) => {
+        const gt = norm(x.trackName), ga = norm(x.artistName);
+        return (gt.includes(wt) || wt.includes(gt)) && (ga.includes(wa) || wa.includes(ga));
+      });
+      const loose = list.find((x) => {
+        const gt = norm(x.trackName);
+        return gt.includes(wt) || wt.includes(gt);
+      });
+      const hit = strong || loose;
+      if (hit) {
+        return {
+          ...t,
+          title: hit.trackName || t.title,
+          artist: hit.artistName || t.artist,
+          previewUrl: hit.previewUrl || null,
+          verified: true,
+          loose: !strong,
+        };
+      }
+    } catch {
+      /* 타임아웃·네트워크 오류는 미검증으로 처리 */
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { ...t, verified: false, previewUrl: null };
+}
+
+async function enrich(parsed) {
+  const tracks = Array.isArray(parsed.tracks) ? parsed.tracks : [];
+  const all = [...tracks];
+  const hasHidden = parsed.hidden && parsed.hidden.title;
+  if (hasHidden) all.push(parsed.hidden);
+
+  const done = await Promise.all(all.map(lookup));
+  parsed.tracks = done.slice(0, tracks.length);
+  if (hasHidden) parsed.hidden = done[done.length - 1];
+  return parsed;
+}
+
 const OK_MIME = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 export default async (req) => {
@@ -155,7 +220,16 @@ export default async (req) => {
       return Response.json({ error: "응답이 비어 있었어요. 다시 시도해 주세요." }, { status: 502 });
     }
 
-    return Response.json({ text }, { headers: { "cache-control": "no-store" } });
+    /* 실존 여부 확인 + 미리듣기 URL 부착 */
+    let payload = { text };
+    try {
+      const parsed = JSON.parse(text);
+      payload = { result: await enrich(parsed) };
+    } catch (e) {
+      console.error("parse/enrich 실패, 원문 그대로 반환", e);
+    }
+
+    return Response.json(payload, { headers: { "cache-control": "no-store" } });
   } catch (e) {
     console.error(e);
     return Response.json({ error: "네트워크 오류가 발생했어요." }, { status: 502 });
